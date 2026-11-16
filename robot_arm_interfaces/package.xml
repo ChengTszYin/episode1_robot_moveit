@@ -8,10 +8,11 @@
   <license>TODO: License declaration</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
-
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+  <depend>geometry_msgs</depend>
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
-
+  <exec_depend>rosidl_default_runtime</exec_depend>
   <!-- ? 这行代码的作用是将这个package添加到rosidl_interface_packages组中，
   这样在其他package中使用这个package时，就可以直接使用这个package的interface了 -->
   <member_of_group>rosidl_interface_packages</member_of_group> 

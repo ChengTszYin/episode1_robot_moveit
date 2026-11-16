@@ -10,6 +10,7 @@ from moveit_configs_utils import MoveItConfigsBuilder
 from moveit_msgs.msg import CollisionObject, Constraints, OrientationConstraint
 from shape_msgs.msg import SolidPrimitive
 from geometry_msgs.msg import PoseStamped, Pose
+from robot_arm_interfaces.srv import RobotEntries
 import tf_transformations
 from typing import Dict, List
 
@@ -34,6 +35,13 @@ class MoveitAPI(Node):
         max_acceleration_scaling = self.get_parameter('max_acceleration_scaling').value
         
         self.get_logger().info(f"Initializing {robot_name} MoveAPI")
+        
+        self.robot_busy = False
+        self.service = self.create_service(
+            RobotEntries,
+            'Moveit_Robo_Node',
+            self._task_entry_cb,
+        )
         
         robot_config = self._build_moveit_config(
             robot_name=robot_name, package_name=package_name,
@@ -134,7 +142,7 @@ class MoveitAPI(Node):
             x_rot, y_rot, z_rot, axes='sxyz'
         )
         pose_goal = PoseStamped()
-        pose_goal.head.frame_id = "base_link"
+        pose_goal.header.frame_id = "base_link"
         pose_goal.pose.position.x = x / 1000.0
         pose_goal.pose.position.y = y / 1000.0
         pose_goal.pose.position.z = z / 1000.0
@@ -144,7 +152,7 @@ class MoveitAPI(Node):
         pose_goal.pose.orientation.w = q_w
         
         self.arm.set_start_state_to_current_state()
-        self.arm.set_goal_state(pose_stamped_msg=pose_goal, link6='link6')
+        self.arm.set_goal_state(pose_stamped_msg=pose_goal, pose_link='link6')
         plan_result = self.arm.plan()
         if plan_result:
             self.robot.execute(group_name=self.planning_group, robot_trajectory=plan_result.trajectory)
@@ -234,17 +242,58 @@ class MoveitAPI(Node):
                 'rotation_deg': [np.rad2deg(a) for a in euler_rad]
             }
             
+    def _task_entry_cb(self, request, response):
+        if self.robot_busy:
+            response.success = False
+            response.message = "Robot busy"
+            return response
+
+        if not request.poses:
+            response.success = False
+            response.message = "No poses in request"
+            return response
+
+        self.robot_busy = True
+        try:
+            for i, pose in enumerate(request.poses):
+                x = pose.position.x * 1000.0   # m → mm (adjust if your move_to_pose already expects meters)
+                y = pose.position.y * 1000.0
+                z = pose.position.z * 1000.0
+
+                q = pose.orientation
+                x_rot, y_rot, z_rot = tf_transformations.euler_from_quaternion(
+                    [q.x, q.y, q.z, q.w], axes='sxyz'
+                )
+
+                self.get_logger().info(f"Trying grasp {i+1}/{len(request.poses)}")
+                if self.move_to_pose(x, y, z, x_rot, y_rot, z_rot):
+                    response.success = True
+                    response.message = f"Executed grasp {i+1}"
+                    return response
+
+            response.success = False
+            response.message = "All grasp poses failed to plan/execute"
+        except Exception as e:
+            self.get_logger().error(f"Service error: {e}")
+            response.success = False
+            response.message = f"error: {e}"
+        finally:
+            self.robot_busy = False
+        return response   
+            
             
     def task(self):
         result = self.move_to_degrees(angles_deg=[36.0, 54.0, 2.0, 10.0, 24.0, 111.0])
         self.get_logger().info(f"result: '{result}'")
+        
 
 def main(args=None):
     rclpy.init(args=args)
     node = None
     try:
         node = MoveitAPI()
-        node.task()
+        # node.task()
+        rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     except Exception as e:

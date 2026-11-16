@@ -13,6 +13,7 @@ find_package(ament_cmake REQUIRED)
 
 # add custom interface
 find_package(rosidl_default_generators REQUIRED)
+find_package(geometry_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/AngleMode.action"
   "action/MoveXyzRotation.action"
@@ -22,6 +23,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/ServoGripper.srv"
   "srv/SetFreeMode.srv"
   "msg/MotorAngles.msg"
+  
+  "srv/RobotEntries.srv"
+  DEPENDENCIES geometry_msgs
 )
 
 if(BUILD_TESTING)
