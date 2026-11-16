@@ -1,0 +1,25 @@
+moveit_setup_assistant_config:
+  urdf:
+    package: episode1_urdf_with_gripper
+    relative_path: urdf/episode1_gripper_attached.urdf
+  srdf:
+    relative_path: config/episode1_with_gripper.srdf
+  package_settings:
+    author_name: neil
+    author_email: ken1999429@gmail.com
+    generated_timestamp: 1794721951
+  control_xacro:
+    command:
+      - position
+    state:
+      - position
+      - velocity
+  modified_urdf:
+    xacros:
+      - control_xacro
+  control_xacro:
+    command:
+      - position
+    state:
+      - position
+      - velocity
