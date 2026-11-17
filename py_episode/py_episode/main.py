@@ -3,15 +3,17 @@ import rclpy
 from rclpy.node import Node
 from moveit.planning import MoveItPy
 from moveit.core.robot_state import RobotState
-import numpy as np
-import time
-import os
+from tf2_ros import Buffer, TransformListener
 from moveit_configs_utils import MoveItConfigsBuilder
 from moveit_msgs.msg import CollisionObject, Constraints, OrientationConstraint
 from shape_msgs.msg import SolidPrimitive
-from geometry_msgs.msg import PoseStamped, Pose
+from geometry_msgs.msg import Pose
+from tf2_geometry_msgs import PoseStamped
 from robot_arm_interfaces.srv import RobotEntries
 import tf_transformations
+import numpy as np
+import time
+import os
 from typing import Dict, List
 
 
@@ -35,6 +37,8 @@ class MoveitAPI(Node):
         max_acceleration_scaling = self.get_parameter('max_acceleration_scaling').value
         
         self.get_logger().info(f"Initializing {robot_name} MoveAPI")
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self) 
         
         self.robot_busy = False
         self.service = self.create_service(
@@ -256,11 +260,20 @@ class MoveitAPI(Node):
         self.robot_busy = True
         try:
             for i, pose in enumerate(request.poses):
-                x = pose.position.x * 1000.0   # m → mm (adjust if your move_to_pose already expects meters)
-                y = pose.position.y * 1000.0
-                z = pose.position.z * 1000.0
+                pose_stamped = PoseStamped()
+                pose_stamped.header.frame_id = "camera_link"
+                pose_stamped.header.stamp = rclpy.time.Time().to_msg()
+                pose_stamped.pose = pose
+                try:
+                    pose_base = self.tf_buffer.transform(pose_stamped, "base_link", timeout=rclpy.duration.Duration(seconds=1.0))
+                except Exception as e:
+                    self.get_logger().warn(f"TF transform failed: {e}")
+                    continue
+                x = pose_base.pose.position.x * 1000.0   # m → mm (adjust if your move_to_pose already expects meters)
+                y = pose_base.pose.position.y * 1000.0
+                z = pose_base.pose.position.z * 1000.0
 
-                q = pose.orientation
+                q = pose_base.pose.orientation
                 x_rot, y_rot, z_rot = tf_transformations.euler_from_quaternion(
                     [q.x, q.y, q.z, q.w], axes='sxyz'
                 )
