@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
+from rclpy.time import Time
 from moveit.planning import MoveItPy
 from moveit.core.robot_state import RobotState
+from robot_arm_interfaces.action import MoveXyzRotation
+from rclpy.action import ActionClient
 from tf2_ros import Buffer, TransformListener
 from moveit_configs_utils import MoveItConfigsBuilder
 from moveit_msgs.msg import CollisionObject, Constraints, OrientationConstraint
 from shape_msgs.msg import SolidPrimitive
-from geometry_msgs.msg import Pose
-from tf2_geometry_msgs import PoseStamped
+from geometry_msgs.msg import Pose, PoseStamped
+from tf2_geometry_msgs import PoseStamped as tf2_PoseStamped
+from visualization_msgs.msg import Marker
 from robot_arm_interfaces.srv import RobotEntries
 import tf_transformations
 import numpy as np
+from scipy.spatial.transform import Rotation
 import time
 import os
+import yaml
+from ament_index_python.packages import get_package_share_directory
 from typing import Dict, List
+
+from itertools import permutations
 
 
 class MoveitAPI(Node):
@@ -39,6 +48,13 @@ class MoveitAPI(Node):
         self.get_logger().info(f"Initializing {robot_name} MoveAPI")
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self) 
+        self._move_xyz_client = ActionClient(self, MoveXyzRotation, 'move_xyz_rotation')
+        
+        pkg_direct = get_package_share_directory('py_episode')
+        file_path = os.path.join(pkg_direct, "config", "T_camera2end.yaml")
+        with open(file_path, 'r')  as f:
+            data = yaml.safe_load(f)
+        self.T_camera2end = np.array(data['T_camera2end'])
         
         self.robot_busy = False
         self.service = self.create_service(
@@ -46,6 +62,9 @@ class MoveitAPI(Node):
             'Moveit_Robo_Node',
             self._task_entry_cb,
         )
+        
+        self.goal_pub = self.create_publisher(PoseStamped, '/grasp_goal_pose', 10) ### for testing
+        self.marker_pub = self.create_publisher(Marker, '/grasp_marker', 10) ### for testing
         
         robot_config = self._build_moveit_config(
             robot_name=robot_name, package_name=package_name,
@@ -66,7 +85,8 @@ class MoveitAPI(Node):
         except Exception as e:
             self.get_logger().error(f"Failed to initialize Moveit: {e}")
             raise
-        
+
+    
     def _build_moveit_config(self, robot_name, package_name, planning_pipeline,
                                   planning_attempts, max_velocity_scaling,
                                   max_acceleration_scaling) -> Dict:
@@ -145,7 +165,7 @@ class MoveitAPI(Node):
         q_x, q_y, q_z, q_w = tf_transformations.quaternion_from_euler(
             x_rot, y_rot, z_rot, axes='sxyz'
         )
-        pose_goal = PoseStamped()
+        pose_goal = tf2_PoseStamped()
         pose_goal.header.frame_id = "base_link"
         pose_goal.pose.position.x = x / 1000.0
         pose_goal.pose.position.y = y / 1000.0
@@ -164,6 +184,32 @@ class MoveitAPI(Node):
             return True
         self.get_logger().warn(f"Failed to plan Pose [{x:.1f}, {y:.1f}, {z:.1f}, {x_rot:.1f}, {y_rot:.1f}, {z_rot:.1f}]")
         return False
+    
+    def send_move_xyz(self, position, rotation, ik_mode="zyx", speed_ratio=0.5) -> bool:
+        """position: [x,y,z] mm, rotation: [rx,ry,rz] degrees"""
+        if not self._move_xyz_client.wait_for_server(timeout_sec=2.0):
+            self.get_logger().error("move_xyz_rotation action server not available")
+            return False
+
+        goal = MoveXyzRotation.Goal()
+        goal.position = [float(position[0]), float(position[1]), float(position[2])]
+        goal.rotation = [float(rotation[0]), float(rotation[1]), float(rotation[2])]
+        goal.ik_mode = ik_mode
+        goal.speed_ratio = speed_ratio
+
+        self.get_logger().info(f"Sending MoveXyzRotation: pos={goal.position} rot={goal.rotation} mode={ik_mode}")
+        future = self._move_xyz_client.send_goal_async(goal)
+        rclpy.spin_until_future_complete(self, future)
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            self.get_logger().warn("MoveXyzRotation goal rejected")
+            return False
+
+        result_future = goal_handle.get_result_async()
+        rclpy.spin_until_future_complete(self, result_future)
+        result = result_future.result().result
+        self.get_logger().info(f"MoveXyzRotation result: success={result.success} msg={result.message}")
+        return result.success
     
     # ==================== Scene Management ====================
     
@@ -246,6 +292,142 @@ class MoveitAPI(Node):
                 'rotation_deg': [np.rad2deg(a) for a in euler_rad]
             }
             
+    def test_task_entry_cb(self, request, response):
+        if self.robot_busy:
+            response.success = False
+            response.message = "Robot busy"
+            return response
+
+        if not request.poses:
+            response.success = False
+            response.message = "No poses in request"
+            return response
+
+        self.robot_busy = True
+        try:
+            for i, pose in enumerate(request.poses):
+                def get_tf(target, source, time):
+                    transform = self.tf_buffer.lookup_transform(
+                        target_frame=target,
+                        source_frame=source,
+                        time=time,
+                        timeout=rclpy.duration.Duration(seconds=1.0)
+                    )
+                    t = transform.transform.translation
+                    q = transform.transform.rotation
+                    quat = [q.x, q.y, q.z, q.w]
+                    _quat = Rotation.from_quat(quat).as_matrix()
+                    matrix = np.eye(4)
+                    matrix[:3, :3] = _quat
+                    matrix[:3, 3] = [t.x, t.y, t.z]
+                    return matrix
+
+                now = Time()
+                t = [pose.position.x, pose.position.y, pose.position.z]
+                q = [pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w]
+
+                # Grasp in optical frame (no extra axis adjustment)
+                quat = Rotation.from_quat(q).as_matrix()
+                T_grasp2camera_op = np.eye(4)
+                T_grasp2camera_op[:3, :3] = quat
+                T_grasp2camera_op[:3, 3] = t
+                
+                # 90° around X swaps Y and Z (try both signs)
+                R_corr = Rotation.from_euler('z', np.pi/2).as_matrix()   # or -np.pi/2
+                T_corr = np.eye(4)
+                T_corr[:3, :3] = R_corr
+                T_grasp2camera_op = T_corr @ T_grasp2camera_op
+
+                # Hand-eye: optical → end-effector
+                T_cam2end = self.T_camera2end.copy()
+                T_cam2end[:3, 3] /= 1000.0
+                T_grasp2end = T_cam2end @ T_grasp2camera_op
+
+                # End-effector → base
+                T_end2base = get_tf("base_link", "link6", now)
+                T_grasp2base = T_end2base @ T_grasp2end
+            
+
+                # Tool offset
+                theta = 0
+                alpha = 0
+                d = 0.12
+                a = 0
+                T_servo2end = np.array([
+                    [np.cos(theta), -np.sin(theta)*np.cos(alpha), np.sin(theta)*np.sin(alpha), a*np.cos(theta)],
+                    [np.sin(theta),  np.cos(theta)*np.cos(alpha), -np.cos(theta)*np.sin(alpha), a*np.sin(theta)],
+                    [0, np.sin(alpha), np.cos(alpha), d],
+                    [0, 0, 0, 1]
+                ])
+                
+                T_end2base_new = T_grasp2base @ np.linalg.inv(T_servo2end)
+                P_base = T_end2base_new[:3, 3]
+                P_base[1] = -P_base[1]   # flip Y if needed
+                P_base[2] = -P_base[2]   # flip Z if needed
+                x, y, z = P_base
+
+                # Flip only the inverted axes (Y and Z)
+                P_base[1] = -P_base[1]
+                P_base[2] = -P_base[2]
+
+                x, y, z = P_base
+
+                rotation = Rotation.from_matrix(T_end2base_new[:3, :3])
+                euler = rotation.as_euler('XZY', degrees=True)
+                x_rot = np.deg2rad(euler[0])
+                y_rot = np.deg2rad(euler[1])
+                z_rot = np.deg2rad(euler[2])
+
+                # Visualization
+                goal_msg = PoseStamped()
+                goal_msg.header.frame_id = "base_link"
+                goal_msg.header.stamp = self.get_clock().now().to_msg()
+                goal_msg.pose.position.x = x
+                goal_msg.pose.position.y = y
+                goal_msg.pose.position.z = z
+                q_vis = rotation.as_quat()
+                goal_msg.pose.orientation.x = q_vis[0]
+                goal_msg.pose.orientation.y = q_vis[1]
+                goal_msg.pose.orientation.z = q_vis[2]
+                goal_msg.pose.orientation.w = q_vis[3]
+                self.goal_pub.publish(goal_msg)
+
+                marker = Marker()
+                marker.header.frame_id = "base_link"
+                marker.header.stamp = self.get_clock().now().to_msg()
+                marker.ns = "grasp"
+                marker.id = 0
+                marker.type = Marker.SPHERE
+                marker.action = Marker.ADD
+                marker.pose.position.x = x
+                marker.pose.position.y = y
+                marker.pose.position.z = z
+                marker.pose.orientation.w = 1.0
+                marker.scale.x = 0.02
+                marker.scale.y = 0.02
+                marker.scale.z = 0.02
+                marker.color.r = 1.0
+                marker.color.g = 0.0
+                marker.color.b = 0.0
+                marker.color.a = 1.0
+                self.marker_pub.publish(marker)
+                self.get_logger().info(f"maker x: {x:.3f} y: {y:.3f} z: {z:.3f}")
+
+                if self.move_to_pose(x, y, z, x_rot, y_rot, z_rot):
+                    response.success = True
+                    response.message = f"Executed grasp {i+1}"
+                    return response
+
+            response.success = False
+            response.message = "All grasp poses failed to plan/execute"
+        except Exception as e:
+            self.get_logger().error(f"Service error: {e}")
+            response.success = False
+            response.message = f"error: {e}"
+        finally:
+            self.robot_busy = False
+        return response
+            
     def _task_entry_cb(self, request, response):
         if self.robot_busy:
             response.success = False
@@ -260,25 +442,111 @@ class MoveitAPI(Node):
         self.robot_busy = True
         try:
             for i, pose in enumerate(request.poses):
-                pose_stamped = PoseStamped()
-                pose_stamped.header.frame_id = "camera_link"
-                pose_stamped.header.stamp = rclpy.time.Time().to_msg()
-                pose_stamped.pose = pose
-                try:
-                    pose_base = self.tf_buffer.transform(pose_stamped, "base_link", timeout=rclpy.duration.Duration(seconds=1.0))
-                except Exception as e:
-                    self.get_logger().warn(f"TF transform failed: {e}")
-                    continue
-                x = pose_base.pose.position.x * 1000.0   # m → mm (adjust if your move_to_pose already expects meters)
-                y = pose_base.pose.position.y * 1000.0
-                z = pose_base.pose.position.z * 1000.0
+                def get_tf(target, source, time):
+                    transform = self.tf_buffer.lookup_transform(
+                        target_frame=target,
+                        source_frame=source,
+                        time=time,
+                        timeout=rclpy.duration.Duration(seconds=1.0)
+                    )
+                    t = transform.transform.translation
+                    q = transform.transform.rotation
+                    quat = [q.x, q.y, q.z, q.w]
+                    _quat = Rotation.from_quat(quat).as_matrix()
+                    matrix = np.eye(4)
+                    matrix[:3, :3] = _quat
+                    matrix[:3, 3] = [t.x, t.y, t.z]
+                    return matrix
 
-                q = pose_base.pose.orientation
-                x_rot, y_rot, z_rot = tf_transformations.euler_from_quaternion(
-                    [q.x, q.y, q.z, q.w], axes='sxyz'
-                )
+                now = Time()
+                t = [pose.position.x, pose.position.y, pose.position.z]
+                q = [pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w]
 
-                self.get_logger().info(f"Trying grasp {i+1}/{len(request.poses)}")
+                # Grasp in optical frame (no extra axis adjustment)
+                quat = Rotation.from_quat(q).as_matrix()
+                T_grasp2camera_op = np.eye(4)
+                T_grasp2camera_op[:3, :3] = quat
+                T_grasp2camera_op[:3, 3] = t
+                
+                # 90° around X swaps Y and Z (try both signs)
+                R_corr = Rotation.from_euler('z', -np.pi/2).as_matrix()   # or -np.pi/2
+                T_corr = np.eye(4)
+                T_corr[:3, :3] = R_corr
+                T_grasp2camera_op = T_corr @ T_grasp2camera_op
+
+                # Hand-eye: optical → end-effector
+                T_cam2end = self.T_camera2end.copy()
+                T_cam2end[:3, 3] /= 1000.0
+                T_grasp2end = T_cam2end @ T_grasp2camera_op
+
+                # End-effector → base
+                T_end2base = get_tf("base_link", "link6", now)
+                T_grasp2base = T_end2base @ T_grasp2end
+            
+
+                # Tool offset
+                theta = 0
+                alpha = 0
+                d = 0.12
+                a = 0
+                T_servo2end = np.array([
+                    [np.cos(theta), -np.sin(theta)*np.cos(alpha), np.sin(theta)*np.sin(alpha), a*np.cos(theta)],
+                    [np.sin(theta),  np.cos(theta)*np.cos(alpha), -np.cos(theta)*np.sin(alpha), a*np.sin(theta)],
+                    [0, np.sin(alpha), np.cos(alpha), d],
+                    [0, 0, 0, 1]
+                ])
+                
+                T_end2base_new = T_grasp2base @ np.linalg.inv(T_servo2end)
+                P_base = T_end2base_new[:3, 3]
+                P_base[0] = P_base[0]
+                P_base[1] = P_base[1]   # flip Y if needed
+                P_base[2] = P_base[2]   # flip Z if needed
+                x, y, z = P_base
+
+                # Flip only the inverted axes (Y and Z)
+
+
+                rotation = Rotation.from_matrix(T_end2base_new[:3, :3])
+                euler = rotation.as_euler('XZY', degrees=True)
+                x_rot = np.deg2rad(euler[0])
+                y_rot = np.deg2rad(euler[1])
+                z_rot = np.deg2rad(euler[2])
+
+                # Visualization
+                goal_msg = PoseStamped()
+                goal_msg.header.frame_id = "base_link"
+                goal_msg.header.stamp = self.get_clock().now().to_msg()
+                goal_msg.pose.position.x = x
+                goal_msg.pose.position.y = y
+                goal_msg.pose.position.z = z
+                q_vis = rotation.as_quat()
+                goal_msg.pose.orientation.x = q_vis[0]
+                goal_msg.pose.orientation.y = q_vis[1]
+                goal_msg.pose.orientation.z = q_vis[2]
+                goal_msg.pose.orientation.w = q_vis[3]
+                self.goal_pub.publish(goal_msg)
+
+                marker = Marker()
+                marker.header.frame_id = "base_link"
+                marker.header.stamp = self.get_clock().now().to_msg()
+                marker.ns = "grasp"
+                marker.id = 0
+                marker.type = Marker.SPHERE
+                marker.action = Marker.ADD
+                marker.pose.position.x = x
+                marker.pose.position.y = y
+                marker.pose.position.z = z
+                marker.pose.orientation.w = 1.0
+                marker.scale.x = 0.02
+                marker.scale.y = 0.02
+                marker.scale.z = 0.02
+                marker.color.r = 1.0
+                marker.color.g = 0.0
+                marker.color.b = 0.0
+                marker.color.a = 1.0
+                self.marker_pub.publish(marker)
+                self.get_logger().info(f"maker x: {x:.3f} y: {y:.3f} z: {z:.3f}")
+
                 if self.move_to_pose(x, y, z, x_rot, y_rot, z_rot):
                     response.success = True
                     response.message = f"Executed grasp {i+1}"
@@ -292,7 +560,7 @@ class MoveitAPI(Node):
             response.message = f"error: {e}"
         finally:
             self.robot_busy = False
-        return response   
+        return response
             
             
     def task(self):
