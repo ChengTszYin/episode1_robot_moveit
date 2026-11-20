@@ -102,7 +102,7 @@ class MoveitAPI(Node):
         # 添加 per-group OMPL 覆盖 (默认规划器、投影评估器) 
         if "ompl" in base_config:
             base_config["ompl"][self.planning_group] = {
-                "default_planner_config": "RRTConnect",
+                "default_planner_config": "PRM",
                 "planner_configs": ["RRTConnect", "RRT", "PRM", "EST", "BiEST"],
                 "projection_evaluator": "joints(joint1,joint2,joint3)",
             }
@@ -333,10 +333,14 @@ class MoveitAPI(Node):
                 T_grasp2camera_op[:3, 3] = t
                 
                 # 90° around X swaps Y and Z (try both signs)
-                R_corr = Rotation.from_euler('z', np.pi/2).as_matrix()   # or -np.pi/2
+                R_corr = Rotation.from_euler('z', -np.pi/2).as_matrix()   # or -np.pi/2
                 T_corr = np.eye(4)
                 T_corr[:3, :3] = R_corr
                 T_grasp2camera_op = T_corr @ T_grasp2camera_op
+                
+                # R_flip = Rotation.from_euler('y', -np.pi/2).as_matrix()
+                # T_grasp2camera_op[:3, :3] = R_flip @ T_grasp2camera_op[:3, :3]
+                
 
                 # Hand-eye: optical → end-effector
                 T_cam2end = self.T_camera2end.copy()
@@ -362,21 +366,16 @@ class MoveitAPI(Node):
                 
                 T_end2base_new = T_grasp2base @ np.linalg.inv(T_servo2end)
                 P_base = T_end2base_new[:3, 3]
-                P_base[1] = -P_base[1]   # flip Y if needed
-                P_base[2] = -P_base[2]   # flip Z if needed
                 x, y, z = P_base
 
-                # Flip only the inverted axes (Y and Z)
-                P_base[1] = -P_base[1]
-                P_base[2] = -P_base[2]
-
-                x, y, z = P_base
 
                 rotation = Rotation.from_matrix(T_end2base_new[:3, :3])
                 euler = rotation.as_euler('XZY', degrees=True)
-                x_rot = np.deg2rad(euler[0])
-                y_rot = np.deg2rad(euler[1])
-                z_rot = np.deg2rad(euler[2])
+                x_rot, y_rot, z_rot = euler
+                self.get_logger().info(f"pose x_rot: {x_rot:.3f} y_rot: {y_rot:.3f} z_rot: {z_rot:.3f}")
+                x_rot = np.deg2rad(90.0)
+                y_rot = np.deg2rad(0.0)
+                z_rot = np.deg2rad(90.0)
 
                 # Visualization
                 goal_msg = PoseStamped()
@@ -411,8 +410,11 @@ class MoveitAPI(Node):
                 marker.color.b = 0.0
                 marker.color.a = 1.0
                 self.marker_pub.publish(marker)
+                
+                x = x * 1000.0
+                y = y * 1000.0
+                z = z * 1000.0
                 self.get_logger().info(f"maker x: {x:.3f} y: {y:.3f} z: {z:.3f}")
-
                 if self.move_to_pose(x, y, z, x_rot, y_rot, z_rot):
                     response.success = True
                     response.message = f"Executed grasp {i+1}"
@@ -427,6 +429,7 @@ class MoveitAPI(Node):
         finally:
             self.robot_busy = False
         return response
+    
             
     def _task_entry_cb(self, request, response):
         if self.robot_busy:
@@ -473,6 +476,10 @@ class MoveitAPI(Node):
                 T_corr = np.eye(4)
                 T_corr[:3, :3] = R_corr
                 T_grasp2camera_op = T_corr @ T_grasp2camera_op
+                
+                # R_flip = Rotation.from_euler('y', -np.pi/2).as_matrix()
+                # T_grasp2camera_op[:3, :3] = R_flip @ T_grasp2camera_op[:3, :3]
+                
 
                 # Hand-eye: optical → end-effector
                 T_cam2end = self.T_camera2end.copy()
@@ -498,19 +505,16 @@ class MoveitAPI(Node):
                 
                 T_end2base_new = T_grasp2base @ np.linalg.inv(T_servo2end)
                 P_base = T_end2base_new[:3, 3]
-                P_base[0] = P_base[0]
-                P_base[1] = P_base[1]   # flip Y if needed
-                P_base[2] = P_base[2]   # flip Z if needed
                 x, y, z = P_base
-
-                # Flip only the inverted axes (Y and Z)
 
 
                 rotation = Rotation.from_matrix(T_end2base_new[:3, :3])
                 euler = rotation.as_euler('XZY', degrees=True)
-                x_rot = np.deg2rad(euler[0])
-                y_rot = np.deg2rad(euler[1])
-                z_rot = np.deg2rad(euler[2])
+                x_rot, y_rot, z_rot = euler
+                self.get_logger().info(f"pose x_rot: {x_rot:.3f} y_rot: {y_rot:.3f} z_rot: {z_rot:.3f}")
+                x_rot = np.deg2rad(90.0)
+                y_rot = np.deg2rad(0.0)
+                z_rot = np.deg2rad(90.0)
 
                 # Visualization
                 goal_msg = PoseStamped()
@@ -545,8 +549,11 @@ class MoveitAPI(Node):
                 marker.color.b = 0.0
                 marker.color.a = 1.0
                 self.marker_pub.publish(marker)
+                
+                x = x * 1000.0
+                y = y * 1000.0
+                z = z * 1000.0
                 self.get_logger().info(f"maker x: {x:.3f} y: {y:.3f} z: {z:.3f}")
-
                 if self.move_to_pose(x, y, z, x_rot, y_rot, z_rot):
                     response.success = True
                     response.message = f"Executed grasp {i+1}"
