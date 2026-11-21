@@ -22,7 +22,6 @@ import os
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from typing import Dict, List
-
 from itertools import permutations
 
 
@@ -36,6 +35,7 @@ class MoveitAPI(Node):
         self.declare_parameter('planning_attempts', 3)
         self.declare_parameter('max_velocity_scaling', 0.7)
         self.declare_parameter('max_acceleration_scaling', 0.3)
+        self.declare_parameter('gripper_offset', 0.0)
         
         robot_name = self.get_parameter('robot_name').value
         package_name = self.get_parameter('package_name').value
@@ -44,6 +44,7 @@ class MoveitAPI(Node):
         planning_attempts = self.get_parameter('planning_attempts').value
         max_velocity_scaling = self.get_parameter('max_velocity_scaling').value
         max_acceleration_scaling = self.get_parameter('max_acceleration_scaling').value
+        self.gripper_offset = self.get_parameter('gripper_offset').value
         
         self.get_logger().info(f"Initializing {robot_name} MoveAPI")
         self.tf_buffer = Buffer()
@@ -51,10 +52,15 @@ class MoveitAPI(Node):
         self._move_xyz_client = ActionClient(self, MoveXyzRotation, 'move_xyz_rotation')
         
         pkg_direct = get_package_share_directory('py_episode')
-        file_path = os.path.join(pkg_direct, "config", "T_camera2end.yaml")
-        with open(file_path, 'r')  as f:
+        tf_file_path = os.path.join(pkg_direct, "config", "T_camera2end.yaml")
+        with open(tf_file_path, 'r')  as f:
             data = yaml.safe_load(f)
         self.T_camera2end = np.array(data['T_camera2end'])
+        
+        offset_file_path = os.path.join(pkg_direct, 'config', 'robot_reset.yaml')
+        with open(offset_file_path, 'r') as f:
+            of = yaml.safe_load(f)
+        self.offset = np.array(of["position_offset"])
         
         self.robot_busy = False
         self.service = self.create_service(
@@ -470,15 +476,14 @@ class MoveitAPI(Node):
                 T_grasp2camera_op = np.eye(4)
                 T_grasp2camera_op[:3, :3] = quat
                 T_grasp2camera_op[:3, 3] = t
+                # === Same remapping as the working GraspNet demo ===
+                T_grasp2camera_op[:, [0, 2]] = T_grasp2camera_op[:, [2, 0]]
+                T_grasp2camera_op[:, 0] = -T_grasp2camera_op[:, 0]
                 
-                # 90° around X swaps Y and Z (try both signs)
-                R_corr = Rotation.from_euler('z', -np.pi/2).as_matrix()   # or -np.pi/2
-                T_corr = np.eye(4)
-                T_corr[:3, :3] = R_corr
-                T_grasp2camera_op = T_corr @ T_grasp2camera_op
-                
-                # R_flip = Rotation.from_euler('y', -np.pi/2).as_matrix()
-                # T_grasp2camera_op[:3, :3] = R_flip @ T_grasp2camera_op[:3, :3]
+                # R_corr = Rotation.from_euler('z', -np.pi/2).as_matrix()   # or -np.pi/2
+                # T_corr = np.eye(4)
+                # T_corr[:3, :3] = R_corr
+                # T_grasp2camera_op = T_corr @ T_grasp2camera_op
                 
 
                 # Hand-eye: optical → end-effector
@@ -504,14 +509,18 @@ class MoveitAPI(Node):
                 ])
                 
                 T_end2base_new = T_grasp2base @ np.linalg.inv(T_servo2end)
+                approach_vec = T_end2base_new[:3, 1] * self.gripper_offset
                 P_base = T_end2base_new[:3, 3]
-                x, y, z = P_base
-
+                P_base = P_base - approach_vec
 
                 rotation = Rotation.from_matrix(T_end2base_new[:3, :3])
                 euler = rotation.as_euler('XZY', degrees=True)
                 x_rot, y_rot, z_rot = euler
                 self.get_logger().info(f"pose x_rot: {x_rot:.3f} y_rot: {y_rot:.3f} z_rot: {z_rot:.3f}")
+                
+                self.get_logger().info(f"before P_base {P_base}")
+                P_base += self.offset
+                x, y, z = P_base
                 x_rot = np.deg2rad(90.0)
                 y_rot = np.deg2rad(0.0)
                 z_rot = np.deg2rad(90.0)

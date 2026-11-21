@@ -409,7 +409,7 @@
     </inertial>
     
     <visual>
-      <origin xyz="-0.014704 -0.003673 0.005833" rpy="-1.5707963 0 0" />
+      <origin xyz="-0.044704 -0.003673 0.005833" rpy="-1.5707963 0 0" />
       <geometry>
         <mesh filename="package://episode1_urdf_with_gripper/meshes/visual/gripper/D435_Solid.STL" scale="0.001 0.001 0.001" />
       </geometry>
@@ -418,14 +418,14 @@
       </material>
     </visual>
     <collision>
-      <origin xyz="-0.014704 -0.003673 0.005833" rpy="-1.5707963 0 0" />
+      <origin xyz="-0.044704 -0.003673 0.005833" rpy="-1.5707963 0 0" />
       <geometry>
         <mesh filename="package://episode1_urdf_with_gripper/meshes/visual/gripper/D435_Solid.STL" scale="0.001 0.001 0.001" />
       </geometry>
     </collision>
   </link>
   <joint name="camera_joint" type="fixed">
-    <origin xyz="-0.027893 -0.006754 -0.056342" rpy="0 0 0" />
+    <origin xyz="0.004893 -0.006754 -0.056342" rpy="0 0 0" />
     <parent link="gripper_base_link" />
     <child link="camera_link" />
     <axis xyz="0 0 0" />
