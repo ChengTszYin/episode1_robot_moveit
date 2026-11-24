@@ -13,7 +13,7 @@ from shape_msgs.msg import SolidPrimitive
 from geometry_msgs.msg import Pose, PoseStamped
 from tf2_geometry_msgs import PoseStamped as tf2_PoseStamped
 from visualization_msgs.msg import Marker
-from robot_arm_interfaces.srv import RobotEntries
+from robot_arm_interfaces.srv import RobotEntries, RobotMoveState
 import tf_transformations
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -28,8 +28,8 @@ from itertools import permutations
 class MoveitAPI(Node):
     def __init__(self):
         super().__init__('moveit_api_node')
-        self.declare_parameter('robot_name', 'episode1_urdf_1113')
-        self.declare_parameter('package_name', 'episode1_urdf_student_moveit')
+        self.declare_parameter('robot_name', 'episode1_with_gripper')
+        self.declare_parameter('package_name', 'episode1_urdf_with_gripper_moveit')
         self.declare_parameter('planning_group', 'episode_arm')
         self.declare_parameter('planning_pipeline', 'ompl')
         self.declare_parameter('planning_attempts', 3)
@@ -63,10 +63,16 @@ class MoveitAPI(Node):
         self.offset = np.array(of["position_offset"])
         
         self.robot_busy = False
-        self.service = self.create_service(
+        self.pick_service = self.create_service(
             RobotEntries,
-            'Moveit_Robo_Node',
+            'moveit_user_controller/pick_item',
             self._task_entry_cb,
+        )
+        
+        self.state_req_service = self.create_service(
+            RobotMoveState,
+            'moveit_user_controller/move_to_state',
+            self._move_to_state_cb,
         )
         
         self.goal_pub = self.create_publisher(PoseStamped, '/grasp_goal_pose', 10) ### for testing
@@ -100,7 +106,7 @@ class MoveitAPI(Node):
         base_config = MoveItConfigsBuilder(
             robot_name=robot_name, package_name=package_name
         ).robot_description_semantic(
-            "config/episode1_urdf_1113.srdf", {"name": robot_name}
+            "config/episode1_with_gripper.srdf", {"name": robot_name}
         ).planning_pipelines(
             default_planning_pipeline=planning_pipeline
         ).to_dict()
@@ -188,6 +194,8 @@ class MoveitAPI(Node):
             self.robot.execute(group_name=self.planning_group, robot_trajectory=plan_result.trajectory)
             time.sleep(0.5)
             return True
+        if np.sqrt(x**2 + y**2 + z**2) > 500.0:
+            self.get_logger().warn(f"Object distance exceed working distance (500mm)")
         self.get_logger().warn(f"Failed to plan Pose [{x:.1f}, {y:.1f}, {z:.1f}, {x_rot:.1f}, {y_rot:.1f}, {z_rot:.1f}]")
         return False
     
@@ -337,15 +345,14 @@ class MoveitAPI(Node):
                 T_grasp2camera_op = np.eye(4)
                 T_grasp2camera_op[:3, :3] = quat
                 T_grasp2camera_op[:3, 3] = t
+                # === Same remapping as the working GraspNet demo ===
+                T_grasp2camera_op[:, [0, 2]] = T_grasp2camera_op[:, [2, 0]]
+                T_grasp2camera_op[:, 0] = -T_grasp2camera_op[:, 0]
                 
-                # 90° around X swaps Y and Z (try both signs)
-                R_corr = Rotation.from_euler('z', -np.pi/2).as_matrix()   # or -np.pi/2
-                T_corr = np.eye(4)
-                T_corr[:3, :3] = R_corr
-                T_grasp2camera_op = T_corr @ T_grasp2camera_op
-                
-                # R_flip = Rotation.from_euler('y', -np.pi/2).as_matrix()
-                # T_grasp2camera_op[:3, :3] = R_flip @ T_grasp2camera_op[:3, :3]
+                # R_corr = Rotation.from_euler('z', -np.pi/2).as_matrix()   # or -np.pi/2
+                # T_corr = np.eye(4)
+                # T_corr[:3, :3] = R_corr
+                # T_grasp2camera_op = T_corr @ T_grasp2camera_op
                 
 
                 # Hand-eye: optical → end-effector
@@ -371,17 +378,20 @@ class MoveitAPI(Node):
                 ])
                 
                 T_end2base_new = T_grasp2base @ np.linalg.inv(T_servo2end)
+                approach_vec = T_end2base_new[:3, 1] * self.gripper_offset
                 P_base = T_end2base_new[:3, 3]
+                P_base = P_base - approach_vec
                 x, y, z = P_base
-
-
+                
                 rotation = Rotation.from_matrix(T_end2base_new[:3, :3])
                 euler = rotation.as_euler('XZY', degrees=True)
-                x_rot, y_rot, z_rot = euler
+                extra_angle = 83.0
+                                
+                # orientation of the pickpose (link 4-6 + gripper)
+                R_align_y = Rotation.from_euler('x', -90, degrees=True).as_matrix()
+                T_end2base_new[:3, :3] = R_align_y @ T_end2base_new[:3, :3]
+                x_rot, y_rot, z_rot = Rotation.from_matrix(T_end2base_new[:3, :3]).as_euler('xyz')
                 self.get_logger().info(f"pose x_rot: {x_rot:.3f} y_rot: {y_rot:.3f} z_rot: {z_rot:.3f}")
-                x_rot = np.deg2rad(90.0)
-                y_rot = np.deg2rad(0.0)
-                z_rot = np.deg2rad(90.0)
 
                 # Visualization
                 goal_msg = PoseStamped()
@@ -479,12 +489,6 @@ class MoveitAPI(Node):
                 # === Same remapping as the working GraspNet demo ===
                 T_grasp2camera_op[:, [0, 2]] = T_grasp2camera_op[:, [2, 0]]
                 T_grasp2camera_op[:, 0] = -T_grasp2camera_op[:, 0]
-                
-                # R_corr = Rotation.from_euler('z', -np.pi/2).as_matrix()   # or -np.pi/2
-                # T_corr = np.eye(4)
-                # T_corr[:3, :3] = R_corr
-                # T_grasp2camera_op = T_corr @ T_grasp2camera_op
-                
 
                 # Hand-eye: optical → end-effector
                 T_cam2end = self.T_camera2end.copy()
@@ -511,19 +515,17 @@ class MoveitAPI(Node):
                 T_end2base_new = T_grasp2base @ np.linalg.inv(T_servo2end)
                 approach_vec = T_end2base_new[:3, 1] * self.gripper_offset
                 P_base = T_end2base_new[:3, 3]
-                P_base = P_base - approach_vec
-
+                P_base = (P_base - approach_vec) * 1000.0
+                x, y, z = P_base 
+                
                 rotation = Rotation.from_matrix(T_end2base_new[:3, :3])
                 euler = rotation.as_euler('XZY', degrees=True)
-                x_rot, y_rot, z_rot = euler
-                self.get_logger().info(f"pose x_rot: {x_rot:.3f} y_rot: {y_rot:.3f} z_rot: {z_rot:.3f}")
+                            
                 
-                self.get_logger().info(f"before P_base {P_base}")
-                P_base += self.offset
-                x, y, z = P_base
-                x_rot = np.deg2rad(90.0)
-                y_rot = np.deg2rad(0.0)
-                z_rot = np.deg2rad(90.0)
+                R_align_x = Rotation.from_euler('x', -90, degrees=True).as_matrix()
+                T_end2base_new[:3, :3] = R_align_x @ T_end2base_new[:3, :3]
+                x_rot, y_rot, z_rot = Rotation.from_matrix(T_end2base_new[:3, :3]).as_euler('xyz')
+                self.get_logger().info(f"pose x_rot: {x_rot:.3f} y_rot: {y_rot:.3f} z_rot: {z_rot:.3f}")
 
                 # Visualization
                 goal_msg = PoseStamped()
@@ -559,9 +561,9 @@ class MoveitAPI(Node):
                 marker.color.a = 1.0
                 self.marker_pub.publish(marker)
                 
-                x = x * 1000.0
-                y = y * 1000.0
-                z = z * 1000.0
+                # x = x * 1000.0
+                # y = y * 1000.0
+                # z = z * 1000.0
                 self.get_logger().info(f"maker x: {x:.3f} y: {y:.3f} z: {z:.3f}")
                 if self.move_to_pose(x, y, z, x_rot, y_rot, z_rot):
                     response.success = True
@@ -577,6 +579,30 @@ class MoveitAPI(Node):
         finally:
             self.robot_busy = False
         return response
+    
+    def _move_to_state_cb(self, request, response):
+        if self.robot_busy:
+            response.success = False
+            response.message = "Robot busy"
+            return response
+        state = request.state
+        if not isinstance(state, str):
+            response.success = False
+            response.message = "State name error. please use str"
+        try:
+            if(self.move_to_target(state)):
+                response.success = True
+                response.message = f"Moved to {state} successfully."
+            else:
+                response.success = True
+                response.message = f"Failed to move to {state}."
+        
+        except Exception as e:
+            self.get_logger().warn(f"Failed to move state: {state}")
+            response.success = False
+            response.message = f"move state error: {e}"
+        finally:
+            return response
             
             
     def task(self):

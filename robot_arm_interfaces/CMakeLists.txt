@@ -25,6 +25,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MotorAngles.msg"
   
   "srv/RobotEntries.srv"
+  "srv/RobotMoveState.srv"
   DEPENDENCIES geometry_msgs
 )
 
