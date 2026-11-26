@@ -22,7 +22,6 @@ import os
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from typing import Dict, List
-from itertools import permutations
 
 
 class MoveitAPI(Node):
@@ -89,6 +88,7 @@ class MoveitAPI(Node):
         try:
             self.robot = MoveItPy(node_name="moveit_py", config_dict=robot_config)
             self.arm = self.robot.get_planning_component(self.planning_group)
+            self.gripper = self.robot.get_planning_component("gripper")
             self.planning_scene_monitor = self.robot.get_planning_scene_monitor()
             
             self.get_logger().info("Waiting for robot status...")
@@ -166,7 +166,7 @@ class MoveitAPI(Node):
         self.arm.set_goal_state(robot_state=robot_state)
         plan_result = self.arm.plan()
         if plan_result:
-            self.robot.execute(group_name=self.planning_group, robot_trajectory=plan_result.trajectory)
+            self.robot.execute(group_name=self.planning_group, robot_traejectory=plan_result.trajectory)
             time.sleep(0.5)
             return True
         self.get_logger().warn(f"Failed to plan Joint Angle '{angles_deg}'")
@@ -305,6 +305,24 @@ class MoveitAPI(Node):
                 'rotation_rad': list(euler_rad),
                 'rotation_deg': [np.rad2deg(a) for a in euler_rad]
             }
+    
+    def set_gripper(self, value: float) -> bool:
+        """
+        Set gripper position.
+        0.0 = open, 2.0 = closed
+        """
+        self.gripper.set_start_state_to_current_state()
+        robot_state = RobotState(self.robot.get_robot_model())
+        robot_state.joint_positions = {"joint_gear1": value}
+
+        self.gripper.set_goal_state(robot_state=robot_state)
+        plan_result = self.gripper.plan()
+        if plan_result:
+            self.robot.execute(group_name="gripper", robot_trajectory=plan_result.trajectory)
+            time.sleep(0.5)
+            return True
+        self.get_logger().warn(f"Failed to plan gripper to {value}")
+        return False
             
     def test_task_entry_cb(self, request, response):
         if self.robot_busy:
@@ -606,8 +624,13 @@ class MoveitAPI(Node):
             
             
     def task(self):
-        result = self.move_to_degrees(angles_deg=[36.0, 54.0, 2.0, 10.0, 24.0, 111.0])
-        self.get_logger().info(f"result: '{result}'")
+        # result = self.move_to_degrees(angles_deg=[36.0, 54.0, 2.0, 10.0, 24.0, 111.0])
+        # self.get_logger().info(f"result: '{result}'")
+        while True:
+            self.set_gripper(0.0)
+            time.sleep(2.0)
+            self.set_gripper(2.0)
+            time.sleep(2.0)
         
 
 def main(args=None):
@@ -615,7 +638,7 @@ def main(args=None):
     node = None
     try:
         node = MoveitAPI()
-        # node.task()
+        node.task()
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
