@@ -26,6 +26,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   
   "srv/RobotEntries.srv"
   "srv/RobotMoveState.srv"
+  "srv/GripperOnOff.srv"
   DEPENDENCIES geometry_msgs
 )
 

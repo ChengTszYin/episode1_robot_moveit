@@ -37,7 +37,7 @@
         <joint name="joint2" value="-1.1368"/>
         <joint name="joint3" value="1.1604"/>
         <joint name="joint4" value="0"/>
-        <joint name="joint5" value="0"/>
+        <joint name="joint5" value="0.384"/>
         <joint name="joint6" value="4.7"/>
     </group_state>
     <!--END EFFECTOR: Purpose: Represent information about an end effector.-->

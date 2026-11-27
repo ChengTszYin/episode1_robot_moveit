@@ -13,7 +13,7 @@ from shape_msgs.msg import SolidPrimitive
 from geometry_msgs.msg import Pose, PoseStamped
 from tf2_geometry_msgs import PoseStamped as tf2_PoseStamped
 from visualization_msgs.msg import Marker
-from robot_arm_interfaces.srv import RobotEntries, RobotMoveState
+from robot_arm_interfaces.srv import RobotEntries, RobotMoveState, GripperOnOff
 import tf_transformations
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -22,6 +22,9 @@ import os
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from typing import Dict, List
+
+GRIPPER_MAX_RAD = 1.8
+GRIPPER_MIN_RAD = 0.0
 
 
 class MoveitAPI(Node):
@@ -72,6 +75,12 @@ class MoveitAPI(Node):
             RobotMoveState,
             'moveit_user_controller/move_to_state',
             self._move_to_state_cb,
+        )
+        
+        self.gripper_req_service = self.create_service(
+            GripperOnOff,
+            'moveit_user_controller/gripper_onoff',
+            self._gripper_cb,
         )
         
         self.goal_pub = self.create_publisher(PoseStamped, '/grasp_goal_pose', 10) ### for testing
@@ -336,6 +345,7 @@ class MoveitAPI(Node):
             return response
 
         self.robot_busy = True
+        self.set_gripper(0.0)   ### open the gripper
         try:
             for i, pose in enumerate(request.poses):
                 def get_tf(target, source, time):
@@ -366,12 +376,6 @@ class MoveitAPI(Node):
                 # === Same remapping as the working GraspNet demo ===
                 T_grasp2camera_op[:, [0, 2]] = T_grasp2camera_op[:, [2, 0]]
                 T_grasp2camera_op[:, 0] = -T_grasp2camera_op[:, 0]
-                
-                # R_corr = Rotation.from_euler('z', -np.pi/2).as_matrix()   # or -np.pi/2
-                # T_corr = np.eye(4)
-                # T_corr[:3, :3] = R_corr
-                # T_grasp2camera_op = T_corr @ T_grasp2camera_op
-                
 
                 # Hand-eye: optical → end-effector
                 T_cam2end = self.T_camera2end.copy()
@@ -381,7 +385,6 @@ class MoveitAPI(Node):
                 # End-effector → base
                 T_end2base = get_tf("base_link", "link6", now)
                 T_grasp2base = T_end2base @ T_grasp2end
-            
 
                 # Tool offset
                 theta = 0
@@ -396,19 +399,19 @@ class MoveitAPI(Node):
                 ])
                 
                 T_end2base_new = T_grasp2base @ np.linalg.inv(T_servo2end)
-                approach_vec = T_end2base_new[:3, 1] * self.gripper_offset
-                P_base = T_end2base_new[:3, 3]
-                P_base = P_base - approach_vec
-                x, y, z = P_base
+                # approach_vec = T_end2base_new[:3, 1] * self.gripper_offset
+                P_base = T_end2base_new[:3, 3] * 1000.0
+                # P_base = (P_base - approach_vec) * 1000.0
+                x, y, z = P_base 
                 
                 rotation = Rotation.from_matrix(T_end2base_new[:3, :3])
                 euler = rotation.as_euler('XZY', degrees=True)
-                extra_angle = 83.0
-                                
-                # orientation of the pickpose (link 4-6 + gripper)
-                R_align_y = Rotation.from_euler('x', -90, degrees=True).as_matrix()
-                T_end2base_new[:3, :3] = R_align_y @ T_end2base_new[:3, :3]
-                x_rot, y_rot, z_rot = Rotation.from_matrix(T_end2base_new[:3, :3]).as_euler('xyz')
+                            
+                
+                R_align_x = Rotation.from_euler('x', -90, degrees=True).as_matrix()
+                # R_align_z = Rotation.from_euler('z', -180, degrees=True).as_matrix()
+                T_end2base_new[:3, :3] = R_align_x @ T_end2base_new[:3, :3]
+                x_rot, y_rot, z_rot = Rotation.from_matrix(T_end2base_new[:3, :3]).as_euler('ZYX')
                 self.get_logger().info(f"pose x_rot: {x_rot:.3f} y_rot: {y_rot:.3f} z_rot: {z_rot:.3f}")
 
                 # Visualization
@@ -444,14 +447,17 @@ class MoveitAPI(Node):
                 marker.color.b = 0.0
                 marker.color.a = 1.0
                 self.marker_pub.publish(marker)
-                
-                x = x * 1000.0
-                y = y * 1000.0
-                z = z * 1000.0
                 self.get_logger().info(f"maker x: {x:.3f} y: {y:.3f} z: {z:.3f}")
-                if self.move_to_pose(x, y, z, x_rot, y_rot, z_rot):
+                
+                move = self.move_to_pose(x, y, z, x_rot, y_rot, z_rot)
+                if not move:
+                    response.success = False
+                    response.message = f"Failed to executed grasp {i+1}"
+                    return response
+                self.get_logger().info(f"Executed grasp {i+1}. Applying gripper")
+                if self.set_gripper(GRIPPER_MAX_RAD):
                     response.success = True
-                    response.message = f"Executed grasp {i+1}"
+                    response.message = f"Grasp is executed successfully"
                     return response
 
             response.success = False
@@ -477,6 +483,7 @@ class MoveitAPI(Node):
             return response
 
         self.robot_busy = True
+        self.set_gripper(0.0)   ### open the gripper
         try:
             for i, pose in enumerate(request.poses):
                 def get_tf(target, source, time):
@@ -516,7 +523,6 @@ class MoveitAPI(Node):
                 # End-effector → base
                 T_end2base = get_tf("base_link", "link6", now)
                 T_grasp2base = T_end2base @ T_grasp2end
-            
 
                 # Tool offset
                 theta = 0
@@ -531,9 +537,9 @@ class MoveitAPI(Node):
                 ])
                 
                 T_end2base_new = T_grasp2base @ np.linalg.inv(T_servo2end)
-                approach_vec = T_end2base_new[:3, 1] * self.gripper_offset
-                P_base = T_end2base_new[:3, 3]
-                P_base = (P_base - approach_vec) * 1000.0
+                # approach_vec = T_end2base_new[:3, 1] * self.gripper_offset
+                P_base = T_end2base_new[:3, 3] * 1000.0
+                # P_base = (P_base - approach_vec) * 1000.0
                 x, y, z = P_base 
                 
                 rotation = Rotation.from_matrix(T_end2base_new[:3, :3])
@@ -541,8 +547,9 @@ class MoveitAPI(Node):
                             
                 
                 R_align_x = Rotation.from_euler('x', -90, degrees=True).as_matrix()
+                # R_align_z = Rotation.from_euler('z', -180, degrees=True).as_matrix()
                 T_end2base_new[:3, :3] = R_align_x @ T_end2base_new[:3, :3]
-                x_rot, y_rot, z_rot = Rotation.from_matrix(T_end2base_new[:3, :3]).as_euler('xyz')
+                x_rot, y_rot, z_rot = Rotation.from_matrix(T_end2base_new[:3, :3]).as_euler('ZYX')
                 self.get_logger().info(f"pose x_rot: {x_rot:.3f} y_rot: {y_rot:.3f} z_rot: {z_rot:.3f}")
 
                 # Visualization
@@ -578,14 +585,17 @@ class MoveitAPI(Node):
                 marker.color.b = 0.0
                 marker.color.a = 1.0
                 self.marker_pub.publish(marker)
-                
-                # x = x * 1000.0
-                # y = y * 1000.0
-                # z = z * 1000.0
                 self.get_logger().info(f"maker x: {x:.3f} y: {y:.3f} z: {z:.3f}")
-                if self.move_to_pose(x, y, z, x_rot, y_rot, z_rot):
+                
+                move = self.move_to_pose(x, y, z, x_rot, y_rot, z_rot)
+                if not move:
+                    response.success = False
+                    response.message = f"Failed to executed grasp {i+1}"
+                    return response
+                self.get_logger().info(f"Executed grasp {i+1}. Applying gripper")
+                if self.set_gripper(GRIPPER_MAX_RAD):
                     response.success = True
-                    response.message = f"Executed grasp {i+1}"
+                    response.message = f"Grasp is executed successfully"
                     return response
 
             response.success = False
@@ -621,15 +631,25 @@ class MoveitAPI(Node):
             response.message = f"move state error: {e}"
         finally:
             return response
+    
+    def _gripper_cb(self, request, response):
+        switch = request.enable
+        if switch:
+            self.set_gripper(GRIPPER_MAX_RAD)
+        else:
+            self.set_gripper(GRIPPER_MIN_RAD)
+        response.success = switch
+        response.message = "Finished Gripper request"
+        return response
             
             
     def task(self):
         # result = self.move_to_degrees(angles_deg=[36.0, 54.0, 2.0, 10.0, 24.0, 111.0])
         # self.get_logger().info(f"result: '{result}'")
         while True:
-            self.set_gripper(0.0)
+            self.set_gripper(GRIPPER_MIN_RAD)
             time.sleep(2.0)
-            self.set_gripper(2.0)
+            self.set_gripper(GRIPPER_MAX_RAD)
             time.sleep(2.0)
         
 
@@ -638,7 +658,7 @@ def main(args=None):
     node = None
     try:
         node = MoveitAPI()
-        node.task()
+        # node.task()
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
